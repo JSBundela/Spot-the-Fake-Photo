@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: spot-fake-photo-webdemo
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn -w 1 --timeout 60 -b 0.0.0.0:$PORT webdemo.server:app
+    envVars:
+      - key: ENABLE_SAVE_EXAMPLE
+        value: "0"

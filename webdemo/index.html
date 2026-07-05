@@ -1,0 +1,87 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Spot the Fake Photo -- live demo</title>
+<style>
+  body { font-family: -apple-system, Helvetica, Arial, sans-serif; background: #111; color: #eee; text-align: center; margin: 0; padding: 24px; }
+  h1 { font-weight: 600; font-size: 20px; margin-bottom: 4px; }
+  p.sub { color: #888; margin-top: 0; font-size: 13px; }
+  #wrap { position: relative; display: inline-block; }
+  video, canvas.overlay { border-radius: 12px; }
+  video { width: 480px; max-width: 90vw; }
+  canvas.overlay { position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; }
+  #bar-container { width: 480px; max-width: 90vw; margin: 16px auto 4px; height: 28px; background: #222; border-radius: 14px; overflow: hidden; border: 1px solid #333; }
+  #bar { height: 100%; width: 50%; background: linear-gradient(90deg, #2ecc71, #f1c40f, #e74c3c); transition: width 0.15s linear; }
+  #label { font-size: 22px; font-weight: 700; margin-top: 8px; }
+  #detail { color: #888; font-size: 12px; }
+  .real { color: #2ecc71; }
+  .screen { color: #e74c3c; }
+</style>
+</head>
+<body>
+  <h1>Spot the Fake Photo</h1>
+  <p class="sub">Point the camera at something real, then at a phone/laptop screen showing a photo.</p>
+  <div id="wrap">
+    <video id="video" autoplay playsinline muted></video>
+  </div>
+  <div id="bar-container"><div id="bar"></div></div>
+  <div id="label">--</div>
+  <div id="detail">waiting for camera...</div>
+  <canvas id="capture" style="display:none"></canvas>
+
+<script>
+const video = document.getElementById('video');
+const canvas = document.getElementById('capture');
+const bar = document.getElementById('bar');
+const label = document.getElementById('label');
+const detail = document.getElementById('detail');
+let busy = false;
+
+async function start() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' }, audio: false });
+    video.srcObject = stream;
+  } catch (e) {
+    detail.textContent = 'camera error: ' + e.message;
+  }
+}
+
+async function tick() {
+  if (busy || video.videoWidth === 0) return;
+  busy = true;
+  canvas.width = video.videoWidth;
+  canvas.height = video.videoHeight;
+  canvas.getContext('2d').drawImage(video, 0, 0);
+  const dataUrl = canvas.toDataURL('image/jpeg', 0.85);
+
+  try {
+    const t0 = performance.now();
+    const res = await fetch('/score', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image: dataUrl })
+    });
+    const json = await res.json();
+    const roundtrip = (performance.now() - t0).toFixed(0);
+    const pct = Math.round(json.score * 100);
+    bar.style.width = pct + '%';
+    if (json.score >= json.threshold) {
+      label.textContent = `PHOTO OF A SCREEN (${pct}%)`;
+      label.className = 'screen';
+    } else {
+      label.textContent = `REAL PHOTO (${100 - pct}% real)`;
+      label.className = 'real';
+    }
+    detail.textContent = `server latency ${json.latency_ms} ms  |  round-trip ${roundtrip} ms  |  threshold ${json.threshold.toFixed(2)}`;
+  } catch (e) {
+    detail.textContent = 'error: ' + e.message;
+  }
+  busy = false;
+}
+
+start();
+setInterval(tick, 500);
+</script>
+</body>
+</html>
