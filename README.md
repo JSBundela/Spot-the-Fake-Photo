@@ -2,7 +2,9 @@
 
 Submission for the "Spot the Fake Photo" assignment: given an image, score it 0 (real
 photo) to 1 (photo of a screen / recapture). See [report.md](report.md) for the
-approach, accuracy, latency, and cost.
+approach, accuracy, latency, and cost, and [EXPERIMENTS.md](EXPERIMENTS.md) for the
+full experiment log (model/hyperparameter comparison, a tested CNN alternative, and
+data-leakage issues found and fixed).
 
 **Live demo:** https://spot-fake-photo-webdemo.onrender.com (deployed on Render; may
 take ~30-60s to wake up on the first request after a period of inactivity, a free-tier
@@ -37,6 +39,8 @@ scikit-learn dependency at inference, see report.md for why.
   out-of-fold accuracy in `model.pkl` is the honest number, see report.md).
 - `data/synthetic_proxy/`, `download_real_photos.py`, `make_screen_photos.py` — an
   earlier synthetic proxy dataset, not used to train the shipped model (see report.md).
+- `experiments/` — a tested transfer-learning (CNN) alternative and other experiment
+  scripts; see `EXPERIMENTS.md`. Not part of the shipped model's dependencies.
 - `model.pkl` — the trained model (numpy arrays only, ~670KB).
 - `webdemo/` — live camera demo (Flask), deployed at the URL above. Run locally with
   `python3 webdemo/server.py`, then open `http://localhost:5050`.

@@ -7,3 +7,5 @@ data/real/
 data/screen/
 data/REAL_DATA_captured_by_phone/
 task.md
+experiments/embeddings.npz
+experiments/venv/

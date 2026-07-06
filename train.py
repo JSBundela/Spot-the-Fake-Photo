@@ -1,15 +1,25 @@
 """
 Trains the real-vs-screen classifier on data/{real,screen}.
 
-Feature selection: ranks the ~34 features in features.py by importance and
-keeps only the top 10 (features.py has more detail); with 114 training
-images, the full set overfits and the smaller subset generalizes better.
+Nested cross-validation: feature ranking/selection is redone inside every
+training fold (using only that fold's training data), not once on the full
+114 images -- doing it on the full dataset first and reusing the same
+features for every fold leaks test-fold information into the feature choice
+and inflates the reported accuracy. See EXPERIMENTS.md for the full
+before/after comparison and other design decisions (hyperparameter tuning,
+model comparison, a tested CNN/transfer-learning alternative).
 
-Model: ExtraTrees beat RandomForest/SVM/GBoost/logreg on repeated CV, so
-that's what's shipped. Rather than pickling the sklearn model, this script
-exports each tree's raw arrays (feature/threshold/children/leaf counts) as
-plain numpy, reproduced by rf_light.py -- predict.py never imports
-scikit-learn, which costs ~2s to import on its own.
+Reported accuracy uses a fixed 0.5 decision threshold (no threshold tuned on
+the evaluation data itself). The threshold actually shipped in model.pkl
+(chosen via Youden's J on the full training set) is a separate, deliberate
+choice for where to set the operating point in production -- not used to
+inflate the accuracy number.
+
+Model: ExtraTrees beat RandomForest/SVM/GBoost/logreg on repeated nested CV.
+Rather than pickling the sklearn model, this script exports each tree's raw
+arrays (feature/threshold/children/leaf counts) as plain numpy, reproduced
+by rf_light.py -- predict.py never imports scikit-learn, which costs ~2s to
+import on its own.
 
 Usage:
     python3 train.py
@@ -25,7 +35,7 @@ import numpy as np
 from sklearn.ensemble import RandomForestClassifier, ExtraTreesClassifier, GradientBoostingClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.svm import SVC
-from sklearn.model_selection import StratifiedKFold, cross_val_predict
+from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 from sklearn.metrics import accuracy_score, roc_auc_score, confusion_matrix, classification_report
 
@@ -39,6 +49,7 @@ N_ESTIMATORS = 400
 MAX_DEPTH = 6
 N_TOP_FEATURES = 10
 CV_SEEDS = (1, 2, 3, 4, 5, 6, 7)
+CONFUSION_MATRIX_SEED = CV_SEEDS[0]  # reuse a seed already in the sweep, not an arbitrary extra one
 
 
 def load_folder(folder, label):
@@ -61,6 +72,14 @@ def load_phone_dataset():
     return np.array(X), np.array(y)
 
 
+def select_top_features(X_train, y_train, n_top=N_TOP_FEATURES):
+    """Ranks features by importance using only X_train/y_train, returns the top indices."""
+    ranker = RandomForestClassifier(n_estimators=500, max_depth=MAX_DEPTH, random_state=42)
+    ranker.fit(StandardScaler().fit_transform(X_train), y_train)
+    order = np.argsort(-ranker.feature_importances_)
+    return order[:n_top]
+
+
 def pick_threshold(y_true, scores):
     best_t, best_j = 0.5, -1
     for t in np.linspace(0.05, 0.95, 181):
@@ -77,16 +96,36 @@ def pick_threshold(y_true, scores):
     return best_t
 
 
-def repeated_cv_accuracy(X, y, clf, seeds=CV_SEEDS):
+def nested_cv_accuracy(X, y, clf, seeds=CV_SEEDS, n_top=N_TOP_FEATURES):
+    """Repeated stratified k-fold CV with feature selection redone inside each
+    training fold, and a fixed 0.5 threshold -- no information from a test
+    fold ever touches feature selection, scaling, or thresholding."""
     accs = []
     for seed in seeds:
         skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=seed)
         for tr, te in skf.split(X, y):
-            scaler = StandardScaler().fit(X[tr])
-            clf.fit(scaler.transform(X[tr]), y[tr])
-            pred = clf.predict(scaler.transform(X[te]))
+            top_idx = select_top_features(X[tr], y[tr], n_top)
+            X_tr, X_te = X[tr][:, top_idx], X[te][:, top_idx]
+            scaler = StandardScaler().fit(X_tr)
+            clf.fit(scaler.transform(X_tr), y[tr])
+            pred = clf.predict(scaler.transform(X_te))
             accs.append((pred == y[te]).mean())
     return float(np.mean(accs)), float(np.std(accs))
+
+
+def nested_cv_oof_predictions(X, y, clf, seed, n_top=N_TOP_FEATURES):
+    """One seed's 5-fold CV, nested feature selection, returns per-image
+    out-of-fold probabilities (every image scored by a model that never saw
+    it, with features chosen only from that fold's training data)."""
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=seed)
+    oof_proba = np.zeros(len(y))
+    for tr, te in skf.split(X, y):
+        top_idx = select_top_features(X[tr], y[tr], n_top)
+        X_tr, X_te = X[tr][:, top_idx], X[te][:, top_idx]
+        scaler = StandardScaler().fit(X_tr)
+        clf.fit(scaler.transform(X_tr), y[tr])
+        oof_proba[te] = clf.predict_proba(scaler.transform(X_te))[:, 1]
+    return oof_proba
 
 
 def export_trees(model):
@@ -108,15 +147,7 @@ def main():
     X, y = load_phone_dataset()
     print(f"Phone dataset: {len(X)} images ({(y==0).sum()} real, {(y==1).sum()} screen)\n")
 
-    ranker = RandomForestClassifier(n_estimators=500, max_depth=MAX_DEPTH, random_state=42)
-    ranker.fit(StandardScaler().fit_transform(X), y)
-    order = np.argsort(-ranker.feature_importances_)
-    top_idx = order[:N_TOP_FEATURES]
-    top_names = [FEATURE_NAMES[i] for i in top_idx]
-    print(f"Top {N_TOP_FEATURES} features by importance: {top_names}\n")
-    X_top = X[:, top_idx]
-
-    print(f"Model comparison ({len(CV_SEEDS)}x5-fold repeated CV, {N_TOP_FEATURES}-feature subset):")
+    print(f"Model comparison ({len(CV_SEEDS)}x5-fold nested CV, feature selection redone per fold, 0.5 threshold):")
     candidates = {
         "logreg": LogisticRegression(max_iter=2000, class_weight="balanced"),
         "svm_rbf": SVC(kernel="rbf", C=32.0, gamma=0.05, class_weight="balanced"),
@@ -126,42 +157,63 @@ def main():
     }
     best_name, best_acc = None, -1
     for name, clf in candidates.items():
-        m, s = repeated_cv_accuracy(X_top, y, clf)
-        print(f"  {name}: repeated cv accuracy = {m:.3f} +- {s:.3f}")
+        m, s = nested_cv_accuracy(X, y, clf)
+        print(f"  {name}: nested cv accuracy = {m:.3f} +- {s:.3f}")
         if m > best_acc:
             best_acc, best_name = m, name
-    print(f"  -> {best_name} selected (highest repeated-CV accuracy).\n")
+    print(f"  -> {best_name} selected (highest nested-CV accuracy).\n")
 
-    scaler_full = StandardScaler().fit(X_top)
-    X_s = scaler_full.transform(X_top)
-    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-    et_for_cv = ExtraTreesClassifier(n_estimators=N_ESTIMATORS, max_depth=MAX_DEPTH, random_state=42)
-    oof_proba = cross_val_predict(et_for_cv, X_s, y, cv=skf, method="predict_proba")[:, 1]
+    best_clf_factory = {
+        "logreg": lambda: LogisticRegression(max_iter=2000, class_weight="balanced"),
+        "svm_rbf": lambda: SVC(kernel="rbf", C=32.0, gamma=0.05, class_weight="balanced", probability=True),
+        "gboost": lambda: GradientBoostingClassifier(n_estimators=150, max_depth=2, random_state=42),
+        "random_forest": lambda: RandomForestClassifier(n_estimators=N_ESTIMATORS, max_depth=MAX_DEPTH, random_state=42),
+        "extra_trees": lambda: ExtraTreesClassifier(n_estimators=N_ESTIMATORS, max_depth=MAX_DEPTH, random_state=42),
+    }[best_name]
 
-    threshold = pick_threshold(y, oof_proba)
-    y_pred = (oof_proba >= threshold).astype(int)
+    oof_proba = nested_cv_oof_predictions(X, y, best_clf_factory(), seed=CONFUSION_MATRIX_SEED)
+    y_pred = (oof_proba >= 0.5).astype(int)
     acc = accuracy_score(y, y_pred)
     auc = roc_auc_score(y, oof_proba)
     cm = confusion_matrix(y, y_pred)
 
-    print(f"Out-of-fold accuracy (single representative split) on all {len(y)} photos: {acc:.4f}")
+    print(f"Out-of-fold accuracy (seed={CONFUSION_MATRIX_SEED}, nested feature selection, 0.5 threshold, "
+          f"all {len(y)} photos): {acc:.4f}")
     print(f"ROC AUC: {auc:.4f}")
     print("Confusion matrix [[TN FP][FN TP]]:")
     print(cm)
     print(classification_report(y, y_pred, target_names=["real", "screen"]))
 
+    # ---- Final shipped model: fit feature selection + model on ALL data ----
+    top_idx = select_top_features(X, y, N_TOP_FEATURES)
+    top_names = [FEATURE_NAMES[i] for i in top_idx]
+    print(f"Final feature selection (fit on all {len(y)} images, for the shipped model): {top_names}")
+    X_top = X[:, top_idx]
+
     final_scaler = StandardScaler().fit(X_top)
-    final_model = ExtraTreesClassifier(n_estimators=N_ESTIMATORS, max_depth=MAX_DEPTH, random_state=42)
+    final_model = best_clf_factory()
     final_model.fit(final_scaler.transform(X_top), y)
 
-    trees = export_trees(final_model)
+    # Threshold for the SHIPPED model: chosen via Youden's J on the full training
+    # set. This is a deliberate operating-point choice for production (see
+    # report.md), kept separate from the accuracy figures above, which use a
+    # fixed 0.5 threshold precisely so this choice can't inflate them.
+    full_proba = final_model.predict_proba(final_scaler.transform(X_top))[:, 1]
+    shipped_threshold = pick_threshold(y, full_proba)
 
-    X_check_s = final_scaler.transform(X_top[:20])
-    sk_proba = final_model.predict_proba(X_check_s)[:, 1]
-    manual_proba = np.array([forest_proba(x, trees)[1] for x in X_check_s])
-    max_diff = np.max(np.abs(sk_proba - manual_proba))
-    print(f"(sanity check: numpy vs sklearn forest predict_proba max abs diff = {max_diff:.2e})")
-    assert max_diff < 1e-9, "numpy random forest does not match sklearn's"
+    if best_name == "extra_trees":
+        trees = export_trees(final_model)
+        X_check_s = final_scaler.transform(X_top[:20])
+        sk_proba = final_model.predict_proba(X_check_s)[:, 1]
+        manual_proba = np.array([forest_proba(x, trees)[1] for x in X_check_s])
+        max_diff = np.max(np.abs(sk_proba - manual_proba))
+        print(f"(sanity check: numpy vs sklearn forest predict_proba max abs diff = {max_diff:.2e})")
+        assert max_diff < 1e-9, "numpy random forest does not match sklearn's"
+    else:
+        raise RuntimeError(
+            f"{best_name} won nested CV but rf_light.py only supports RandomForest/ExtraTrees -- "
+            "predict.py would need a different numpy-only export for this model type."
+        )
 
     bundle = {
         "scaler_mean": final_scaler.mean_,
@@ -170,10 +222,10 @@ def main():
         "feature_names": FEATURE_NAMES,
         "selected_feature_idx": top_idx.tolist(),
         "selected_feature_names": top_names,
-        "threshold": float(threshold),
+        "threshold": float(shipped_threshold),
         "oof_accuracy": float(acc),
         "oof_auc": float(auc),
-        "repeated_cv_accuracy_mean": best_acc,
+        "nested_cv_accuracy_mean": best_acc,
         "model_name": best_name,
     }
 

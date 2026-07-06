@@ -1,0 +1,18 @@
+# Only needed for experiments/extract_embeddings.py -- not a dependency of
+# predict.py or train.py.
+#
+# torch's CPU wheels are compiled against numpy<2, which conflicts with
+# opencv-python-headless/scikit-learn's numpy>=2 requirement in the main
+# project's requirements.txt. Use a SEPARATE virtualenv for this:
+#
+#   python3 -m venv experiments/venv && source experiments/venv/bin/activate
+#   pip install -r experiments/requirements.txt
+#   python3 experiments/extract_embeddings.py
+#
+# Then switch back to the main project's venv (numpy>=2, scikit-learn) to
+# run experiments/evaluate_embeddings.py, which just loads the saved
+# embeddings -- no torch import needed there.
+torch==2.2.2
+torchvision==0.17.2
+pillow==12.3.0
+numpy<2
