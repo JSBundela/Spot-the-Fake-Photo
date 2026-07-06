@@ -29,7 +29,7 @@ leak-free estimate.
 ## Latency & cost
 
 **~80-85ms/image** warm (in a long-running process — the realistic serving scenario)
-on this machine's CPU (Apple-silicon laptop): the CNN forward pass is the bulk of it,
+on this machine's CPU (Intel Core i3-1000NG4 @ 1.1GHz laptop): the CNN forward pass is the bulk of it,
 image decode is a few ms. A fresh `python3 predict.py image.jpg` process (importing
 onnxruntime + loading the model fresh) takes **~500-570ms** — that's a one-time
 process-startup cost, not a per-image one; a server or app keeping the process warm
