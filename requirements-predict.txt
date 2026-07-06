@@ -1,5 +1,7 @@
 # predict.py's actual runtime dependencies -- deliberately NOT scikit-learn
-# (see report.md: importing sklearn alone costs ~2s, vs ~60ms for everything
-# predict.py actually does). Use requirements.txt for training/dev instead.
+# or torch (see EXPERIMENTS.md / report.md: onnxruntime is the lightweight
+# runtime for the frozen CNN backbone; torch would conflict with numpy>=2
+# and costs far more to import). Use requirements.txt for training/dev.
 numpy==2.5.1
-opencv-python-headless==5.0.0.93
+pillow==12.3.0
+onnxruntime==1.23.2

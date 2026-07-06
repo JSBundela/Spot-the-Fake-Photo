@@ -6,10 +6,12 @@ Usage:
     python3 predict.py path/to/image.jpg
     -> prints a single float in [0, 1]: 0 = real photo, 1 = photo of a screen.
 
-Loads model.pkl (produced by train.py): a StandardScaler + small ExtraTrees
-forest over 10 of the ~34 features in features.py, stored as plain numpy
-arrays. No scikit-learn import here -- that alone costs ~2s vs ~10ms for
-feature extraction + tree evaluation (see rf_light.py).
+Loads model.pkl (produced by train.py): a StandardScaler + linear SVM over
+576-dim frozen MobileNetV3-small embeddings (cnn_embed.py, running on
+onnxruntime -- not torch, which would conflict with this project's numpy
+version; onnxruntime is also the appropriate lightweight runtime for
+on-device use, unlike bundling all of PyTorch). See EXPERIMENTS.md for why
+this replaced an earlier hand-crafted-feature model.
 """
 import argparse
 import pickle
@@ -17,10 +19,11 @@ import sys
 import time
 from pathlib import Path
 
-import cv2
+import numpy as np
+from PIL import Image
 
-from features import feature_vector
-from rf_light import forest_proba
+from cnn_embed import embed
+from svm_light import linear_decision_function, sigmoid_proba
 
 MODEL_PATH = Path(__file__).parent / "model.pkl"
 
@@ -31,11 +34,12 @@ def load_model():
 
 
 def predict(bgr, bundle):
-    vec, _ = feature_vector(bgr)
-    vec = vec[bundle["selected_feature_idx"]] if "selected_feature_idx" in bundle else vec
+    rgb = bgr[:, :, ::-1]
+    vec = embed(rgb)
     vec_s = (vec - bundle["scaler_mean"]) / bundle["scaler_scale"]
-    proba = forest_proba(vec_s, bundle["trees"])
-    return float(proba[1])
+    decision = linear_decision_function(vec_s, bundle["svm_coef"], bundle["svm_intercept"])
+    proba = sigmoid_proba(decision, bundle["sigmoid_A"], bundle["sigmoid_B"])
+    return float(proba)
 
 
 def main():
@@ -47,10 +51,12 @@ def main():
     bundle = load_model()
 
     t0 = time.perf_counter()
-    bgr = cv2.imread(args.image_path)
-    if bgr is None:
+    try:
+        img = Image.open(args.image_path).convert("RGB")
+    except Exception:
         print(f"error: could not read image at {args.image_path}", file=sys.stderr)
         sys.exit(1)
+    bgr = np.array(img)[:, :, ::-1]
 
     score = predict(bgr, bundle)
     t1 = time.perf_counter()
